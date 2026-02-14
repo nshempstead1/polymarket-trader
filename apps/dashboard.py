@@ -16,7 +16,7 @@ from flask import Flask, render_template_string, jsonify
 app = Flask(__name__)
 
 DATA_DIR = Path("data")
-WALLET = "0x769Bb0B16c551aA103F8aC7642677DDCc9dd8447"
+WALLET = os.getenv("POLY_SAFE_ADDRESS", "0x769Bb0B16c551aA103F8aC7642677DDCc9dd8447")
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>

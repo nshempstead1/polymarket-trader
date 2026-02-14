@@ -92,7 +92,7 @@ class ValueScanner:
                     mid=(bb+ba)/2
                     sig={"price":mid,"spread":spread,"bid_depth":depth,"best_bid":bb,"best_ask":ba,"liquidity":m.get("liquidity",0),"volume_24h":m.get("volume_24h",0),"score":depth/spread if spread>0 else 0}
                     if await execute_buy(s.bot,s.risk,s.journal,"value_scanner",m,outcome,tid,mid,sig,s.dry_run,s.log): s._seen.add(cid)
-                except: continue
+                except Exception as e: s.log.debug(f"Skipped: {e}"); continue
     async def _manage(s):
         for p in [p for p in s.risk.get_all_positions() if p.strategy=="value_scanner"]:
             try:
@@ -121,7 +121,7 @@ class SwingTrader:
                             if not m.get("accepting_orders") or m.get("liquidity",0)<5000: continue
                             for o,tid in m.get("token_ids",{}).items(): s._wl[tid]={"market":m,"outcome":o,"condition_id":m["condition_id"]}
                         s.log.info(f"Watchlist: {len(s._wl)} tokens"); s._wl_t=time.time()
-                    except: pass
+                    except Exception as e: s.log.debug(f"Error: {e}")
                 for tid,info in s._wl.items():
                     try:
                         pr=await asyncio.to_thread(s.search.get_market_price,tid)
@@ -136,7 +136,7 @@ class SwingTrader:
                         if old and (pr-old)<=-s.thresh and pr>=0.10:
                             sig={"swing":pr-old,"old_price":old,"current_price":pr,"lookback_min":30,"liquidity":info["market"].get("liquidity",0)}
                             await execute_buy(s.bot,s.risk,s.journal,"swing_trader",info["market"],info["outcome"],tid,pr,sig,s.dry_run,s.log)
-                    except: continue
+                    except Exception as e: s.log.debug(f"Skipped: {e}"); continue
                 for p in [p for p in s.risk.get_all_positions() if p.strategy=="swing_trader"]:
                     try:
                         pr=await asyncio.to_thread(s.search.get_market_price,p.token_id)
@@ -144,7 +144,7 @@ class SwingTrader:
                         s.journal.update_position_extremes(p.id,pr); ch=pr-p.entry_price
                         if ch>=s.tp: await execute_sell(s.bot,s.risk,s.journal,p,pr,"take_profit",s.dry_run,s.log)
                         elif ch<=-s.sl: await execute_sell(s.bot,s.risk,s.journal,p,pr,"stop_loss",s.dry_run,s.log)
-                    except: pass
+                    except Exception as e: s.log.debug(f"Error: {e}")
                 await asyncio.sleep(s.interval)
             except asyncio.CancelledError: break
             except Exception as e: s.log.error(f"Error: {e}"); await asyncio.sleep(60)
@@ -186,7 +186,7 @@ class EventArbitrage:
                 if ch>=0.05: await execute_sell(s.bot,s.risk,s.journal,p,pr,"take_profit",s.dry_run,s.log)
                 elif ch<=-0.08: await execute_sell(s.bot,s.risk,s.journal,p,pr,"stop_loss",s.dry_run,s.log)
                 elif (time.time()-p.entry_time)>43200: await execute_sell(s.bot,s.risk,s.journal,p,pr,"time_exit_12h",s.dry_run,s.log)
-            except: pass
+            except Exception as e: s.log.debug(f"Error: {e}")
 
 class FlashCrashMonitor:
     def __init__(s, bot, risk, journal, dry_run=False):
@@ -207,14 +207,14 @@ class FlashCrashMonitor:
                                 if not tid: continue
                                 gp=prices.get(side,0.5)
                                 try: lp=await asyncio.to_thread(s.search.get_market_price,tid)
-                                except: continue
+                                except Exception as e: s.log.debug(f"Skipped: {e}"); continue
                                 if lp is None: continue
                                 drop=gp-lp
                                 if drop>=0.20 and lp>=0.05:
                                     sig={"gamma_price":gp,"live_price":lp,"drop":drop,"coin":coin,"side":side}
                                     m={"condition_id":f"15m-{coin}-{int(time.time())}","question":f"{coin} 15-min {side}","liquidity":10000,"volume_24h":0}
                                     await execute_buy(s.bot,s.risk,s.journal,"flash_crash",m,side,tid,lp,sig,s.dry_run,s.log)
-                        except: pass
+                        except Exception as e: s.log.debug(f"Error: {e}")
                 await asyncio.sleep(30)
             except asyncio.CancelledError: break
             except Exception as e: s.log.error(f"Error: {e}"); await asyncio.sleep(60)
@@ -231,9 +231,9 @@ class StatusReporter:
                     try:
                         pr=await asyncio.to_thread(s.search.get_market_price,p.token_id)
                         if pr: s.journal.update_position_extremes(p.id,pr); s.log.info(f"  [{p.strategy[:8]}] {p.outcome.upper()} {p.entry_price:.3f}->{pr:.3f} ${p.unrealized_pnl(pr):+.2f} ({(time.time()-p.entry_time)/60:.0f}m) {p.market_question[:35]}")
-                    except: pass
+                    except Exception as e: s.log.debug(f"Error: {e}")
             except asyncio.CancelledError: break
-            except: pass
+            except Exception as e: s.log.debug(f"Error: {e}")
 
 async def run_daemon(args):
     log=setup_logging(debug=args.debug)
