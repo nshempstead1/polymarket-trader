@@ -56,6 +56,24 @@ class FlashCrashEvent:
 
 
 @dataclass
+class FlashSpikeEvent:
+    """Detected flash spike event (price surging upward)."""
+
+    side: str  # "up" or "down"
+    old_price: float
+    new_price: float
+    spike: float  # Absolute spike amount
+    timestamp: float
+
+    @property
+    def spike_percent(self) -> float:
+        """Calculate percentage spike."""
+        if self.old_price > 0:
+            return (self.new_price - self.old_price) / self.old_price * 100
+        return 0.0
+
+
+@dataclass
 class PriceTracker:
     """
     Tracks price history and detects flash crashes.
@@ -66,6 +84,7 @@ class PriceTracker:
 
     lookback_seconds: int = 10
     drop_threshold: float = 0.30
+    spike_threshold: float = 0.30
     max_history: int = 100
 
     # Price history per side
@@ -206,6 +225,69 @@ class PriceTracker:
         events = []
         for side in ["up", "down"]:
             event = self.detect_flash_crash(side)
+            if event:
+                events.append(event)
+        return events
+
+    def detect_flash_spike(self, side: Optional[str] = None) -> Optional[FlashSpikeEvent]:
+        """
+        Detect if a flash spike (sudden price surge) occurred.
+
+        This is the inverse of detect_flash_crash — looks for
+        rapid upward moves instead of drops.
+
+        Args:
+            side: Specific side to check, or None to check both
+
+        Returns:
+            FlashSpikeEvent if spike detected, None otherwise
+        """
+        sides_to_check = [side] if side else ["up", "down"]
+        now = time.time()
+
+        for s in sides_to_check:
+            if s not in self._history:
+                continue
+
+            history = self._history[s]
+            if len(history) < 2:
+                continue
+
+            current_price = history[-1].price
+
+            old_price = None
+            for point in history:
+                if now - point.timestamp <= self.lookback_seconds:
+                    old_price = point.price
+                    break
+
+            if old_price is None:
+                continue
+
+            # Calculate absolute spike (inverse of drop)
+            spike = current_price - old_price
+
+            if spike >= self.spike_threshold:
+                return FlashSpikeEvent(
+                    side=s,
+                    old_price=old_price,
+                    new_price=current_price,
+                    spike=spike,
+                    timestamp=now,
+                )
+
+        return None
+
+    def detect_all_spikes(self) -> List[FlashSpikeEvent]:
+        """
+        Detect flash spikes on all sides.
+
+        Returns:
+            List of FlashSpikeEvent for all detected spikes
+        """
+        events = []
+        for side in ["up", "down"]:
+            event = self.detect_flash_spike(side)
             if event:
                 events.append(event)
         return events
