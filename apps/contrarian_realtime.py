@@ -1,19 +1,12 @@
 #!/usr/bin/env python3
 """
-Contrarian Real-Time Trader - The Exact Opposite of realtime_trader.py
+Contrarian Real-Time Trader - True Mirror of realtime_trader.py
 
-The original realtime_trader.py:
-  - Watches Binance price moves
-  - If BTC goes UP on Binance -> buys UP on Polymarket
-  - Assumes Binance direction predicts Polymarket outcome
+Same signals, same timing, opposite side.
 
-This contrarian version:
-  - Watches the SAME Binance price moves
-  - If BTC goes UP on Binance -> buys DOWN on Polymarket
-  - Assumes the crowd overreacts to Binance moves (mean reversion)
-
-If the original bot lost consistently by following Binance direction,
-this one should win by fading it.
+Uses the EXACT same fair value computation as the original. When the
+original would buy UP, this buys DOWN. Same Binance tick, same edge
+threshold, opposite position.
 
 Usage:
     python apps/contrarian_realtime.py                  # Live trading BTC+ETH
@@ -61,7 +54,7 @@ ch.setLevel(logging.INFO)
 ch.setFormatter(logging.Formatter('%(asctime)s.%(msecs)03d %(levelname)s: %(message)s', datefmt='%H:%M:%S'))
 logging.basicConfig(level=logging.DEBUG, handlers=[fh, ch])
 logging.getLogger("urllib3").setLevel(logging.WARNING)
-log = logging.getLogger("contrarian_realtime")
+log = logging.getLogger("mirror_realtime")
 
 POLY_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 BINANCE_WS = "wss://stream.binance.com:9443/ws"
@@ -103,36 +96,51 @@ class LiveMarket:
 
     def fair_value(self) -> tuple:
         """
-        CONTRARIAN fair value: INVERTED from original.
+        SAME fair value as the original realtime_trader.py.
 
-        Original: Binance UP -> UP probability increases
-        Contrarian: Binance UP -> DOWN probability increases (fade the move)
-
-        The logic: if Binance price went up, the crowd has already pushed
-        UP too high and DOWN too low. We bet on the reversion.
+        Binance UP -> UP probability increases (identical computation).
+        The flip happens in get_edge() where we swap the side.
         """
         if self.ref_price <= 0 or self.start_price <= 0:
             return 0.5, 0.5
         pct_move = (self.ref_price - self.start_price) / self.start_price
         k = 300  # Same sensitivity as original
-        # INVERTED: negative sign flips the direction
-        # If Binance goes up (pct_move > 0), up_prob goes DOWN
-        up_prob = 1 / (1 + math.exp(k * pct_move))  # Note: +k instead of -k
+        up_prob = 1 / (1 + math.exp(-k * pct_move))  # SAME as original
         up_prob = max(0.08, min(0.92, up_prob))
         return up_prob, 1 - up_prob
 
     def get_edge(self) -> tuple:
-        """Returns (side, edge, fair_price, market_ask, token_id) or (None,0,0,0,"")."""
+        """
+        Same edge detection as original, but returns the OPPOSITE side.
+
+        If the original would buy UP, we return DOWN (and vice versa).
+        Same trigger moment, opposite position.
+
+        Returns (side, edge, fair_price, market_ask, token_id) or (None,0,0,0,"").
+        """
         if not self.has_data:
             return None, 0, 0, 0, ""
         up_fair, down_fair = self.fair_value()
+        # Compute edge the SAME way as original
         up_edge = up_fair - self.up_ask if self.up_ask < 0.95 else -1
         down_edge = down_fair - self.down_ask if self.down_ask < 0.95 else -1
+
+        # Find which side the ORIGINAL would pick
+        orig_side = None
+        orig_edge = 0
         if up_edge > down_edge and up_edge > 0:
-            return "up", up_edge, up_fair, self.up_ask, self.up_token
+            orig_side, orig_edge = "up", up_edge
         elif down_edge > 0:
-            return "down", down_edge, down_fair, self.down_ask, self.down_token
-        return None, 0, 0, 0, ""
+            orig_side, orig_edge = "down", down_edge
+
+        if orig_side is None:
+            return None, 0, 0, 0, ""
+
+        # MIRROR: return the opposite side
+        if orig_side == "up":
+            return "down", orig_edge, down_fair, self.down_ask, self.down_token
+        else:
+            return "up", orig_edge, up_fair, self.up_ask, self.up_token
 
 
 @dataclass
@@ -157,11 +165,13 @@ class LivePosition:
 
 class ContrarianRealTimeTrader:
     """
-    Contrarian dual WebSocket trader for 15-minute crypto markets.
+    Mirror dual WebSocket trader for 15-minute crypto markets.
 
-    Same architecture as RealTimeTrader but with INVERTED fair value:
-    - Original: Binance UP -> buy UP on Polymarket
-    - Contrarian: Binance UP -> buy DOWN on Polymarket (fade the crowd)
+    Same architecture, same signals, same timing as RealTimeTrader.
+    The ONLY difference: when the original would buy UP, this buys DOWN.
+
+    - Original: Binance UP -> computes edge on UP -> buys UP
+    - Mirror:   Binance UP -> computes same edge on UP -> buys DOWN instead
     """
 
     def __init__(self, coins=None, edge_threshold=0.04, trade_size=10.0,
@@ -560,8 +570,8 @@ class ContrarianRealTimeTrader:
             return
 
         log.info("=" * 60)
-        log.info("CONTRARIAN REAL-TIME TRADER")
-        log.info("Fading Binance direction — the OPPOSITE of realtime_trader.py")
+        log.info("MIRROR REAL-TIME TRADER")
+        log.info("Same signals as realtime_trader.py, OPPOSITE side on every trade")
         log.info(f"  Coins: {', '.join(self.coins)} | Edge: {self.edge_threshold:.1%} | Size: ${self.trade_size}")
         log.info(f"  TP: +{self.tp:.2f} / SL: -{self.sl:.2f} | Dry: {self.dry_run}")
         log.info("=" * 60)

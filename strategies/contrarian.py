@@ -1,24 +1,24 @@
 """
-Contrarian Strategy - The Exact Opposite of Flash Crash
+Contrarian Strategy - True Mirror of Flash Crash
 
-The original FlashCrashStrategy buys when prices crash (mean reversion).
-This strategy buys when prices SPIKE (momentum / trend following).
+Same signal, opposite side. When the original FlashCrashStrategy detects
+a crash on "UP" and buys UP, this detects the same crash and buys DOWN.
 
-If the original bot loses consistently, this one should win consistently.
+Triggers at the EXACT same moment as the original, just takes the other side.
 
 Strategy Logic:
 1. Auto-discover current 15-minute market for selected coin
 2. Monitor orderbook prices in real-time via WebSocket
-3. When either "Up" or "Down" probability SPIKES by threshold:
-   - Market buy the spiking side (ride the momentum)
+3. When either "Up" or "Down" probability drops by threshold:
+   - Market buy the OPPOSITE side (not the crashed side)
 4. Exit conditions:
    - Take profit: configurable (default +10 cents)
    - Stop loss: configurable (default -5 cents)
 
 Usage:
-    from strategies.contrarian import FlashSpikeStrategy, FlashSpikeConfig
+    from strategies.contrarian import MirrorFlashCrashStrategy, MirrorFlashCrashConfig
 
-    strategy = FlashSpikeStrategy(bot, config)
+    strategy = MirrorFlashCrashStrategy(bot, config)
     await strategy.run()
 """
 
@@ -31,53 +31,61 @@ from src.bot import TradingBot
 from src.websocket_client import OrderbookSnapshot
 
 
+OPPOSITE_SIDE = {"up": "down", "down": "up"}
+
+
 @dataclass
-class FlashSpikeConfig(StrategyConfig):
-    """Flash spike (contrarian) strategy configuration."""
+class MirrorFlashCrashConfig(StrategyConfig):
+    """Mirror flash crash strategy configuration."""
 
-    spike_threshold: float = 0.30  # Absolute probability spike to trigger
+    drop_threshold: float = 0.30  # Same threshold as original
 
 
-class FlashSpikeStrategy(BaseStrategy):
+class MirrorFlashCrashStrategy(BaseStrategy):
     """
-    Flash Spike Trading Strategy (Contrarian).
+    Mirror Flash Crash Strategy (Contrarian).
 
-    The exact opposite of FlashCrashStrategy. Instead of buying crashes
-    (mean reversion), this buys spikes (momentum). If the original bot
-    lost money buying dips, this one rides winners.
+    True opposite of FlashCrashStrategy: uses the SAME crash detection
+    (same signal, same timing) but buys the OTHER side.
 
-    Monitors 15-minute markets for sudden price INCREASES and trades
-    the momentum with defined take-profit and stop-loss levels.
+    Original: detects crash on UP → buys UP (mean reversion)
+    Mirror:   detects crash on UP → buys DOWN (the crash was right)
     """
 
-    def __init__(self, bot: TradingBot, config: FlashSpikeConfig):
-        """Initialize flash spike strategy."""
+    def __init__(self, bot: TradingBot, config: MirrorFlashCrashConfig):
+        """Initialize mirror flash crash strategy."""
         super().__init__(bot, config)
-        self.spike_config = config
+        self.mirror_config = config
 
-        # Update price tracker with our threshold
-        self.prices.spike_threshold = config.spike_threshold
+        # Use the SAME crash detection as original
+        self.prices.drop_threshold = config.drop_threshold
 
     async def on_book_update(self, snapshot: OrderbookSnapshot) -> None:
-        """Handle orderbook update - check for flash spikes."""
+        """Handle orderbook update."""
         pass  # Price recording is done in base class
 
     async def on_tick(self, prices: Dict[str, float]) -> None:
-        """Check for flash spike on each tick."""
+        """Same crash detection as original, but buy the opposite side."""
         if not self.positions.can_open_position:
             return
 
-        # Detect flash spike (OPPOSITE of flash crash)
-        event = self.prices.detect_flash_spike()
+        # Detect flash crash — SAME signal as FlashCrashStrategy
+        event = self.prices.detect_flash_crash()
         if event:
+            # MIRROR: buy the OPPOSITE side
+            opposite = OPPOSITE_SIDE.get(event.side)
+            if not opposite:
+                return
+
             self.log(
-                f"FLASH SPIKE: {event.side.upper()} "
-                f"surge {event.spike:.2f} ({event.old_price:.2f} -> {event.new_price:.2f})",
+                f"CRASH on {event.side.upper()} "
+                f"drop {event.drop:.2f} ({event.old_price:.2f} -> {event.new_price:.2f}) "
+                f"-> BUY {opposite.upper()} (mirror)",
                 "trade"
             )
-            current_price = prices.get(event.side, 0)
+            current_price = prices.get(opposite, 0)
             if current_price > 0:
-                await self.execute_buy(event.side, current_price)
+                await self.execute_buy(opposite, current_price)
 
     def render_status(self, prices: Dict[str, float]) -> None:
         """Render TUI status display."""
@@ -90,7 +98,7 @@ class FlashSpikeStrategy(BaseStrategy):
 
         lines.append(f"{Colors.BOLD}{'='*80}{Colors.RESET}")
         lines.append(
-            f"{Colors.CYAN}[{self.config.coin} CONTRARIAN]{Colors.RESET} [{ws_status}] "
+            f"{Colors.CYAN}[{self.config.coin} MIRROR]{Colors.RESET} [{ws_status}] "
             f"Ends: {countdown} | Trades: {stats['trades_closed']} | PnL: ${stats['total_pnl']:+.2f}"
         )
         lines.append(f"{Colors.BOLD}{'='*80}{Colors.RESET}")
@@ -133,7 +141,7 @@ class FlashSpikeStrategy(BaseStrategy):
         down_history = self.prices.get_history_count("down")
         lines.append(
             f"History: UP={up_history}/100 DOWN={down_history}/100 | "
-            f"SPIKE threshold: {self.spike_config.spike_threshold:.2f} in {self.config.price_lookback_seconds}s"
+            f"MIRROR: crash detected -> buy OTHER side | threshold: {self.mirror_config.drop_threshold:.2f}"
         )
 
         lines.append(f"{Colors.BOLD}{'='*80}{Colors.RESET}")

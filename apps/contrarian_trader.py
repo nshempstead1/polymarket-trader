@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
 """
-Contrarian Trading Daemon - The Exact Opposite of auto_trader.py
+Contrarian Trading Daemon - True Mirror of auto_trader.py
 
-Every signal is flipped:
-- OvervalueScanner: Buys EXPENSIVE outcomes (65-90%) instead of cheap (10-35%)
-- MomentumTrader: Buys on price RISES instead of drops (trend following)
-- InverseArbitrage: Buys most expensive outcome when prices sum > 1.0
-- FlashSpikeMonitor: Buys on price SPIKES instead of crashes
+Same signals, same timing, opposite side on every trade.
 
-If the original auto_trader lost consistently, this should win consistently.
+Every strategy detects the EXACT same condition as the original, but
+buys the OTHER outcome in the market:
+
+- MirrorValueScanner: finds cheap outcomes (10-35%) → buys the OTHER outcome
+- MirrorSwingTrader: detects price drops → buys the OTHER outcome
+- MirrorArbitrage: finds cheapest when sum < 1 → buys the OTHER outcome
+- MirrorFlashCrash: detects crash on a side → buys the OTHER side
+
+If the original auto_trader lost on every trade, this would have won
+on every trade — same entry time, opposite position.
 
 Usage:
     python apps/contrarian_trader.py --dry-run          # Watch without executing
     python apps/contrarian_trader.py                    # Live trading
-    python apps/contrarian_trader.py --strategies value,momentum
+    python apps/contrarian_trader.py --strategies value,swing
     python apps/contrarian_trader.py --default-trade 15 --max-exposure 300
 """
 
@@ -42,8 +47,27 @@ def setup_logging(log_file="logs/contrarian_trader.log", debug=False):
     return logging.getLogger("contrarian_trader")
 
 
+def get_other_outcome(market: dict, triggered_outcome: str) -> tuple:
+    """
+    Get the OTHER outcome in a binary market.
+
+    Args:
+        market: Market dict with token_ids and prices
+        triggered_outcome: The outcome the original bot would have bought
+
+    Returns:
+        (other_outcome, other_token_id, other_price) or (None, None, None)
+    """
+    token_ids = market.get("token_ids", {})
+    prices = market.get("prices", {})
+    for outcome, tid in token_ids.items():
+        if outcome != triggered_outcome:
+            return outcome, tid, prices.get(outcome, 0)
+    return None, None, None
+
+
 async def execute_buy(bot, risk, journal, strategy, market, outcome, token_id, price, signals, dry_run, log):
-    """Shared buy execution (same mechanics, different signals)."""
+    """Shared buy execution."""
     cid, q = market.get("condition_id",""), market.get("question","")
     size_usdc = risk.config.default_trade_size
     size_shares = size_usdc / price
@@ -83,19 +107,20 @@ async def execute_sell(bot, risk, journal, pos, current_price, exit_reason, dry_
 
 
 # =============================================================================
-# INVERTED STRATEGY 1: OvervalueScanner
+# MIRROR STRATEGY 1: MirrorValueScanner
 #
-# Original ValueScanner: buys cheap outcomes (10-35%) hoping they'll rise
-# Contrarian: buys EXPENSIVE outcomes (65-90%) — winners keep winning
+# Original: finds cheap outcomes (10-35%), buys them
+# Mirror:   finds cheap outcomes (10-35%), buys the OTHER outcome instead
+# Same trigger, same time, opposite side.
 # =============================================================================
 
-class OvervalueScanner:
+class MirrorValueScanner:
     def __init__(s, bot, risk, search, journal, dry_run=False):
         s.bot,s.risk,s.search,s.journal,s.dry_run = bot,risk,search,journal,dry_run
-        s.log=logging.getLogger("overvalue_scanner"); s.scan_interval=300; s.tp=0.15; s.sl=0.10; s._seen=set()
+        s.log=logging.getLogger("mirror_value"); s.scan_interval=300; s.tp=0.15; s.sl=0.10; s._seen=set()
 
     async def run(s):
-        s.log.info("Overvalue Scanner started (CONTRARIAN: buying expensive outcomes)")
+        s.log.info("Mirror Value Scanner started (same signal, opposite side)")
         while True:
             try:
                 if not s.risk.is_halted: await s._scan(); await s._manage()
@@ -110,23 +135,26 @@ class OvervalueScanner:
             cid=m.get("condition_id","")
             if not m.get("accepting_orders") or cid in s._seen or m.get("liquidity",0)<s.risk.config.min_liquidity: continue
             for outcome,price in m.get("prices",{}).items():
-                # INVERTED: buy EXPENSIVE outcomes (65-90%) instead of cheap (10-35%)
-                if not(0.65<=price<=0.90 and m.get("liquidity",0)>5000): continue
+                # SAME signal as original: find cheap outcomes (10-35%)
+                if not(0.10<=price<=0.35 and m.get("liquidity",0)>5000): continue
                 tid=m.get("token_ids",{}).get(outcome)
                 if not tid: continue
+                # MIRROR: get the OTHER outcome
+                other_outcome, other_tid, other_price = get_other_outcome(m, outcome)
+                if not other_tid or other_price <= 0: continue
                 try:
-                    book=await asyncio.to_thread(s.search.get_orderbook,tid)
+                    book=await asyncio.to_thread(s.search.get_orderbook,other_tid)
                     if not book or not book.get("bids") or not book.get("asks"): continue
                     bb,ba=float(book["bids"][0]["price"]),float(book["asks"][0]["price"])
                     spread=ba-bb; depth=sum(float(b["size"]) for b in book["bids"][:5])
                     if spread>0.10 or depth<50: continue
                     mid=(bb+ba)/2
-                    sig={"price":mid,"spread":spread,"bid_depth":depth,"best_bid":bb,"best_ask":ba,"liquidity":m.get("liquidity",0),"volume_24h":m.get("volume_24h",0),"score":depth/spread if spread>0 else 0,"contrarian":"overvalue"}
-                    if await execute_buy(s.bot,s.risk,s.journal,"overvalue_scanner",m,outcome,tid,mid,sig,s.dry_run,s.log): s._seen.add(cid)
+                    sig={"triggered_by":outcome,"triggered_price":price,"mirror_outcome":other_outcome,"price":mid,"spread":spread,"bid_depth":depth,"best_bid":bb,"best_ask":ba,"liquidity":m.get("liquidity",0),"volume_24h":m.get("volume_24h",0),"score":depth/spread if spread>0 else 0}
+                    if await execute_buy(s.bot,s.risk,s.journal,"mirror_value",m,other_outcome,other_tid,mid,sig,s.dry_run,s.log): s._seen.add(cid)
                 except Exception as e: s.log.debug(f"Skipped: {e}"); continue
 
     async def _manage(s):
-        for p in [p for p in s.risk.get_all_positions() if p.strategy=="overvalue_scanner"]:
+        for p in [p for p in s.risk.get_all_positions() if p.strategy=="mirror_value"]:
             try:
                 pr=await asyncio.to_thread(s.search.get_market_price,p.token_id)
                 if pr is None: continue
@@ -138,20 +166,21 @@ class OvervalueScanner:
 
 
 # =============================================================================
-# INVERTED STRATEGY 2: MomentumTrader
+# MIRROR STRATEGY 2: MirrorSwingTrader
 #
-# Original SwingTrader: buys when price DROPS by threshold (mean reversion)
-# Contrarian: buys when price RISES by threshold (momentum / trend following)
+# Original: detects price drop >= 0.08 over 30 min, buys that token
+# Mirror:   detects the same drop, buys the OTHER token in that market
+# Same trigger, same time, opposite side.
 # =============================================================================
 
-class MomentumTrader:
+class MirrorSwingTrader:
     def __init__(s, bot, risk, search, journal, dry_run=False):
         s.bot,s.risk,s.search,s.journal,s.dry_run = bot,risk,search,journal,dry_run
-        s.log=logging.getLogger("momentum_trader"); s.interval=60; s.thresh=0.08; s.tp=0.10; s.sl=0.08
+        s.log=logging.getLogger("mirror_swing"); s.interval=60; s.thresh=0.08; s.tp=0.10; s.sl=0.08
         s.history:Dict[str,List[tuple]]={}; s._wl:Dict[str,dict]={}; s._wl_t=0.0
 
     async def run(s):
-        s.log.info("Momentum Trader started (CONTRARIAN: buying on rises instead of dips)")
+        s.log.info("Mirror Swing Trader started (same signal, opposite side)")
         while True:
             try:
                 if s.risk.is_halted: await asyncio.sleep(60); continue
@@ -174,12 +203,18 @@ class MomentumTrader:
                         old=None
                         for t,p in s.history[tid]:
                             if t>=now-1800: old=p; break
-                        # INVERTED: buy when price RISES instead of drops
-                        if old and (pr-old)>=s.thresh and pr<=0.90:
-                            sig={"momentum":pr-old,"old_price":old,"current_price":pr,"lookback_min":30,"liquidity":info["market"].get("liquidity",0),"contrarian":"momentum"}
-                            await execute_buy(s.bot,s.risk,s.journal,"momentum_trader",info["market"],info["outcome"],tid,pr,sig,s.dry_run,s.log)
+                        # SAME signal as original: detect price drop
+                        if old and (pr-old)<=-s.thresh and pr>=0.10:
+                            # MIRROR: buy the OTHER outcome
+                            other_outcome, other_tid, other_price = get_other_outcome(info["market"], info["outcome"])
+                            if not other_tid: continue
+                            # Get live price for the other side
+                            other_pr = await asyncio.to_thread(s.search.get_market_price, other_tid)
+                            if other_pr is None or other_pr <= 0: continue
+                            sig={"triggered_by":info["outcome"],"swing":pr-old,"old_price":old,"triggered_price":pr,"mirror_outcome":other_outcome,"mirror_price":other_pr,"lookback_min":30,"liquidity":info["market"].get("liquidity",0)}
+                            await execute_buy(s.bot,s.risk,s.journal,"mirror_swing",info["market"],other_outcome,other_tid,other_pr,sig,s.dry_run,s.log)
                     except Exception as e: s.log.debug(f"Skipped: {e}"); continue
-                for p in [p for p in s.risk.get_all_positions() if p.strategy=="momentum_trader"]:
+                for p in [p for p in s.risk.get_all_positions() if p.strategy=="mirror_swing"]:
                     try:
                         pr=await asyncio.to_thread(s.search.get_market_price,p.token_id)
                         if pr is None: continue
@@ -193,19 +228,20 @@ class MomentumTrader:
 
 
 # =============================================================================
-# INVERTED STRATEGY 3: InverseArbitrage
+# MIRROR STRATEGY 3: MirrorArbitrage
 #
-# Original EventArbitrage: buys CHEAPEST outcome when sum < 1.0 (underpriced)
-# Contrarian: buys MOST EXPENSIVE outcome when sum > 1.0 (overpriced)
+# Original: finds cheapest outcome when sum < 1.0, buys cheapest
+# Mirror:   same detection, buys the OTHER outcome instead
+# Same trigger, same time, opposite side.
 # =============================================================================
 
-class InverseArbitrage:
+class MirrorArbitrage:
     def __init__(s, bot, risk, search, journal, dry_run=False):
         s.bot,s.risk,s.search,s.journal,s.dry_run = bot,risk,search,journal,dry_run
-        s.log=logging.getLogger("inverse_arb"); s.interval=120; s.min_mis=0.05
+        s.log=logging.getLogger("mirror_arb"); s.interval=120; s.min_mis=0.05
 
     async def run(s):
-        s.log.info("Inverse Arbitrage started (CONTRARIAN: buying expensive when sum > 1)")
+        s.log.info("Mirror Arbitrage started (same signal, opposite side)")
         while True:
             try:
                 if not s.risk.is_halted: await s._scan(); await s._manage()
@@ -222,18 +258,20 @@ class InverseArbitrage:
                 pr=m.get("prices",{})
                 if len(pr)!=2: continue
                 ps=sum(pr.values())
-                # INVERTED: buy when sum > 1.0 (overpriced) instead of < 1.0 (underpriced)
-                if ps>(1.0+s.min_mis):
-                    # Buy the MOST EXPENSIVE outcome instead of cheapest
-                    exp=max(pr,key=pr.get); ep=pr[exp]; tid=m.get("token_ids",{}).get(exp)
-                    if not tid or ep<0.10 or ep>0.95: continue
-                    fp=ep/ps; edge=ep-fp
+                # SAME signal as original: sum < 1.0 (underpriced)
+                if ps<(1.0-s.min_mis):
+                    # Original would buy cheapest
+                    ch=min(pr,key=pr.get); cp=pr[ch]
+                    fp=cp/ps; edge=fp-cp
                     if edge<0.03: continue
-                    sig={"price_sum":ps,"fair_price":fp,"edge":edge,"expensive_price":ep,"liquidity":m.get("liquidity",0),"contrarian":"inverse_arb"}
-                    await execute_buy(s.bot,s.risk,s.journal,"inverse_arb",m,exp,tid,ep,sig,s.dry_run,s.log)
+                    # MIRROR: buy the OTHER outcome instead
+                    other_outcome, other_tid, other_price = get_other_outcome(m, ch)
+                    if not other_tid or other_price<0.05 or other_price>0.90: continue
+                    sig={"price_sum":ps,"triggered_by":ch,"triggered_price":cp,"fair_price":fp,"edge":edge,"mirror_outcome":other_outcome,"mirror_price":other_price,"liquidity":m.get("liquidity",0)}
+                    await execute_buy(s.bot,s.risk,s.journal,"mirror_arb",m,other_outcome,other_tid,other_price,sig,s.dry_run,s.log)
 
     async def _manage(s):
-        for p in [p for p in s.risk.get_all_positions() if p.strategy=="inverse_arb"]:
+        for p in [p for p in s.risk.get_all_positions() if p.strategy=="mirror_arb"]:
             try:
                 pr=await asyncio.to_thread(s.search.get_market_price,p.token_id)
                 if pr is None: continue
@@ -245,19 +283,20 @@ class InverseArbitrage:
 
 
 # =============================================================================
-# INVERTED STRATEGY 4: FlashSpikeMonitor
+# MIRROR STRATEGY 4: MirrorFlashCrash
 #
-# Original FlashCrashMonitor: buys when price DROPS 20%+ (buy the dip)
-# Contrarian: buys when price SPIKES 20%+ (ride the momentum)
+# Original: detects crash (live price << gamma price) on a side, buys that side
+# Mirror:   detects the same crash, buys the OTHER side
+# Same trigger, same time, opposite side.
 # =============================================================================
 
-class FlashSpikeMonitor:
+class MirrorFlashCrash:
     def __init__(s, bot, risk, journal, dry_run=False):
         s.bot,s.risk,s.journal,s.dry_run = bot,risk,journal,dry_run
-        s.log=logging.getLogger("flash_spike"); s.coins=["BTC","ETH"]; s.gamma=GammaClient(); s.search=MarketSearch()
+        s.log=logging.getLogger("mirror_flash"); s.coins=["BTC","ETH"]; s.gamma=GammaClient(); s.search=MarketSearch()
 
     async def run(s):
-        s.log.info(f"Flash Spike Monitor started for {s.coins} (CONTRARIAN: buying spikes not crashes)")
+        s.log.info(f"Mirror Flash Crash started for {s.coins} (same crash signal, opposite side)")
         while True:
             try:
                 if not s.risk.is_halted:
@@ -273,13 +312,19 @@ class FlashSpikeMonitor:
                                 try: lp=await asyncio.to_thread(s.search.get_market_price,tid)
                                 except Exception as e: s.log.debug(f"Skipped: {e}"); continue
                                 if lp is None: continue
-                                # INVERTED: detect SPIKE (live price ABOVE gamma price)
-                                # instead of CRASH (live price below gamma price)
-                                spike=lp-gp
-                                if spike>=0.20 and lp<=0.95:
-                                    sig={"gamma_price":gp,"live_price":lp,"spike":spike,"coin":coin,"side":side,"contrarian":"flash_spike"}
-                                    m={"condition_id":f"15m-{coin}-{int(time.time())}","question":f"{coin} 15-min {side}","liquidity":10000,"volume_24h":0}
-                                    await execute_buy(s.bot,s.risk,s.journal,"flash_spike",m,side,tid,lp,sig,s.dry_run,s.log)
+                                # SAME signal as original: detect crash
+                                drop=gp-lp
+                                if drop>=0.20 and lp>=0.05:
+                                    # MIRROR: buy the OTHER side
+                                    other_side = "down" if side == "up" else "up"
+                                    other_tid = tids.get(other_side)
+                                    if not other_tid: continue
+                                    try: other_lp = await asyncio.to_thread(s.search.get_market_price, other_tid)
+                                    except: continue
+                                    if other_lp is None or other_lp <= 0: continue
+                                    sig={"triggered_side":side,"gamma_price":gp,"crash_price":lp,"drop":drop,"mirror_side":other_side,"mirror_price":other_lp,"coin":coin}
+                                    m={"condition_id":f"15m-{coin}-{int(time.time())}","question":f"{coin} 15-min {other_side}","liquidity":10000,"volume_24h":0}
+                                    await execute_buy(s.bot,s.risk,s.journal,"mirror_flash",m,other_side,other_tid,other_lp,sig,s.dry_run,s.log)
                         except Exception as e: s.log.debug(f"Error: {e}")
                 await asyncio.sleep(30)
             except asyncio.CancelledError: break
@@ -294,7 +339,7 @@ class StatusReporter:
         while True:
             try:
                 await asyncio.sleep(300); st=s.risk.get_status()
-                s.log.info(f"STATUS [CONTRARIAN] | Pos:{st['positions']}/{st['max_positions']} Exp:${st['total_exposure']:.0f}/${st['max_exposure']:.0f} PnL:${st['daily_pnl']:+.2f} Trades:{st['daily_trades']} Halted:{st['halted']}")
+                s.log.info(f"STATUS [MIRROR] | Pos:{st['positions']}/{st['max_positions']} Exp:${st['total_exposure']:.0f}/${st['max_exposure']:.0f} PnL:${st['daily_pnl']:+.2f} Trades:{st['daily_trades']} Halted:{st['halted']}")
                 for p in s.risk.get_all_positions():
                     try:
                         pr=await asyncio.to_thread(s.search.get_market_price,p.token_id)
@@ -312,21 +357,21 @@ async def run_daemon(args):
     if not bot.is_initialized(): log.error("Bot init failed"); sys.exit(1)
     rc=RiskConfig(min_trade_size=5.0,max_trade_size=args.max_trade,default_trade_size=args.default_trade,max_positions=args.max_positions,max_total_exposure=args.max_exposure,daily_loss_limit=args.daily_loss,daily_trade_limit=args.daily_trades)
     risk=RiskManager(config=rc,state_file="risk_state_contrarian.json"); journal=TradeJournal(db_path="data/trades_contrarian.db"); search=MarketSearch()
-    en=set(args.strategies.split(",")) if args.strategies else {"value","momentum","arb","flash"}
-    log.info("="*60); log.info("CONTRARIAN TRADING DAEMON STARTING")
-    log.info("Every signal is the OPPOSITE of auto_trader.py")
+    en=set(args.strategies.split(",")) if args.strategies else {"value","swing","arb","flash"}
+    log.info("="*60); log.info("MIRROR TRADING DAEMON STARTING")
+    log.info("Same signals as auto_trader.py, OPPOSITE side on every trade")
     log.info(f"  Strategies: {', '.join(en)} | Trade: ${rc.default_trade_size} | Max exp: ${rc.max_total_exposure} | Dry: {args.dry_run}")
     log.info("="*60)
     tasks=[]
-    if "value" in en: tasks.append(asyncio.create_task(OvervalueScanner(bot,risk,search,journal,args.dry_run).run()))
-    if "momentum" in en: tasks.append(asyncio.create_task(MomentumTrader(bot,risk,search,journal,args.dry_run).run()))
-    if "arb" in en: tasks.append(asyncio.create_task(InverseArbitrage(bot,risk,search,journal,args.dry_run).run()))
-    if "flash" in en: tasks.append(asyncio.create_task(FlashSpikeMonitor(bot,risk,journal,args.dry_run).run()))
+    if "value" in en: tasks.append(asyncio.create_task(MirrorValueScanner(bot,risk,search,journal,args.dry_run).run()))
+    if "swing" in en: tasks.append(asyncio.create_task(MirrorSwingTrader(bot,risk,search,journal,args.dry_run).run()))
+    if "arb" in en: tasks.append(asyncio.create_task(MirrorArbitrage(bot,risk,search,journal,args.dry_run).run()))
+    if "flash" in en: tasks.append(asyncio.create_task(MirrorFlashCrash(bot,risk,journal,args.dry_run).run()))
     tasks.append(asyncio.create_task(StatusReporter(risk,search,journal).run()))
     shutdown=asyncio.Event()
     def sh(sig,frame): log.info("Shutdown..."); shutdown.set()
     signal.signal(signal.SIGINT,sh); signal.signal(signal.SIGTERM,sh)
-    log.info(f"Running {len(tasks)} contrarian tasks. Ctrl+C to stop.")
+    log.info(f"Running {len(tasks)} mirror tasks. Ctrl+C to stop.")
     try: await shutdown.wait()
     finally:
         for t in tasks: t.cancel()
@@ -335,8 +380,8 @@ async def run_daemon(args):
 
 
 def main():
-    p=argparse.ArgumentParser(description="Contrarian Polymarket Trading Daemon (opposite of auto_trader)")
-    p.add_argument("--strategies",type=str,default=None,help="value,momentum,arb,flash")
+    p=argparse.ArgumentParser(description="Mirror Trading Daemon (same signals as auto_trader, opposite side)")
+    p.add_argument("--strategies",type=str,default=None,help="value,swing,arb,flash")
     p.add_argument("--max-trade",type=float,default=25.0)
     p.add_argument("--default-trade",type=float,default=10.0)
     p.add_argument("--max-positions",type=int,default=10)
