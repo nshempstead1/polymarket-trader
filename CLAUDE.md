@@ -136,6 +136,60 @@ Key fields:
 - `docs/developers/builders/` - Builder Program, Relayer, gasless transactions
 - `docs/api-reference/` - REST API endpoint specifications
 
+## Mirror (Contrarian) Trading Bot
+
+The mirror bot is the true opposite of every original trading strategy. It uses
+the EXACT same signal detection and triggers at the EXACT same moment, but buys
+the OTHER side of the market. If the original bot lost on a trade, the mirror
+would have won that same trade.
+
+### How it works
+
+Every Polymarket binary market has two outcomes (e.g. UP/DOWN or YES/NO). The
+original bot detects a signal and buys outcome A. The mirror detects the same
+signal at the same time and buys outcome B instead.
+
+| Original Strategy | Signal | Original buys | Mirror buys |
+|---|---|---|---|
+| ValueScanner | Cheap outcome (10-35%) | The cheap outcome | The OTHER outcome |
+| SwingTrader | Price drops 8%+ | The dropped token | The OTHER token |
+| EventArbitrage | Sum < 1.0, cheapest | The cheapest | The OTHER outcome |
+| FlashCrashMonitor | Crash (20%+ drop) | The crashed side | The OTHER side |
+| RealTimeTrader | Binance move + edge | Side with edge | The OPPOSITE side |
+
+### Running the mirror bot
+
+```bash
+# Always dry-run first to verify signals look right
+python apps/contrarian_trader.py --dry-run
+python apps/contrarian_realtime.py --dry-run
+
+# Go live — autonomous daemon (all 4 mirror strategies)
+python apps/contrarian_trader.py
+
+# Go live — real-time WebSocket mirror (Binance + Polymarket)
+python apps/contrarian_realtime.py
+
+# Customize
+python apps/contrarian_trader.py --strategies value,swing --default-trade 15
+python apps/contrarian_realtime.py --coins BTC --edge 0.03 --size 15
+```
+
+### Files
+
+| File | What it does |
+|---|---|
+| `apps/contrarian_trader.py` | Autonomous daemon with 4 mirror strategies (MirrorValueScanner, MirrorSwingTrader, MirrorArbitrage, MirrorFlashCrash) |
+| `apps/contrarian_realtime.py` | Dual WebSocket trader (Binance + Polymarket) with mirrored edge detection |
+| `strategies/contrarian.py` | MirrorFlashCrashStrategy for the TUI strategy runner |
+
+### Key detail
+
+The mirror is NOT an inverted signal. It does not look for different conditions.
+It looks for the SAME conditions as the original and flips which outcome it buys.
+This means the `fair_value()` computation, thresholds, and timing are all identical
+to the original — only the `get_edge()` return value swaps the side.
+
 ## For Beginners
 
 Start with these files in order:
